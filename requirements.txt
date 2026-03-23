@@ -1,0 +1,22 @@
+torch>=2.5.1
+torchvision
+transformers
+timm==0.9.6
+einops
+numpy
+opencv-python
+Pillow
+PyYAML
+pytz
+safetensors
+imageio
+tqdm
+matplotlib
+requests
+scikit-image
+scikit-learn
+
+# Evaluation dependencies
+git+https://github.com/openai/CLIP.git
+dreamsim
+carvekit
