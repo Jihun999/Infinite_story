@@ -58,7 +58,7 @@ def get_args():
     parser.add_argument('--cache_dir', type=str, default='/dev/shm')
     parser.add_argument('--enable_model_cache', type=int, default=0, choices=[0,1])
     parser.add_argument('--checkpoint_type', type=str, default='torch')
-    parser.add_argument('--seed', type=int, default=17)
+    parser.add_argument('--seed', type=int, default=None)
     parser.add_argument('--bf16', type=int, default=1, choices=[0,1])
     parser.add_argument('--infer_type', type=str, default='story')
     parser.add_argument('--exp_name', type=str, default='./output/story_generation')
@@ -99,7 +99,8 @@ if __name__ == '__main__':
     scale_schedule = dynamic_resolution_h_w[h_div_w_template_][args.pn]['scales']
     scale_schedule = [(1, h, w) for (_, h, w) in scale_schedule]
 
-    seed = args.seed
+    import random
+    seed = args.seed if args.seed is not None else random.randint(0, 2**31 - 1)
     print(f"[Seed] {seed}")
     instances = process_prompt(args.prompt_path, args.exp_name)
 

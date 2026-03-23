@@ -69,7 +69,6 @@ CUDA_VISIBLE_DEVICES=0 python story_generation.py \
     --text_encoder_ckpt google/flan-t5-xl \
     --prompt_path ./prompt/consistory_plus.yaml \
     --weight 0.85 \
-    --seed 17 \
     --exp_name ./output/my_experiment \
     --infer_type story
 ```
@@ -81,8 +80,9 @@ CUDA_VISIBLE_DEVICES=0 python story_generation.py \
 | `--weight` | `0.85` | Adaptive Style Injection weight (controls consistency strength) |
 | `--attn_control` | `True` | Enable Adaptive Style Injection |
 | `--cfg_control` | `True` | Enable Synchronized Guidance Adaptation |
-| `--text_replace` | `True` | Enable Identity Prompt Replacement |
-| `--text_scaling` | `True` | Enable Identity Prompt Replacement |
+| `--text_replace` | `True` | Enable Identity Prompt Replacement (text embedding replacement) |
+| `--text_scaling` | `True` | Enable Identity Prompt Replacement (text feature scaling) |
+| `--seed` | `None` | Random seed (random if not specified) |
 | `--prompt_path` | `./prompt/consistory_plus.yaml` | YAML file with story prompts |
 
 ### Prompt Format
@@ -144,7 +144,7 @@ Evaluation dependencies (`dreamsim`, `clip`, `carvekit`, `scikit-learn`) are inc
 │       ├── dist.py                           # Distributed utilities
 │       └── misc.py                           # Miscellaneous utilities
 ├── prompt/                          # Story prompt definitions
-│   ├── consistory_plus.yaml
+│   └── consistory_plus.yaml
 │  
 │  
 └── weights/                         # Model checkpoints (download separately)
