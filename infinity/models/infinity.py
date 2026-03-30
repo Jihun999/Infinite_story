@@ -362,30 +362,7 @@ class Infinity(nn.Module):
         x_BLC_list.append(x_BLC[:,ptr:])
         x_BLC = torch.cat(x_BLC_list, dim=1)
         return x_BLC
-    
-    def AdaIN(self, last_stage_feature, i_th_feature, scale):
-        content_mean = last_stage_feature.mean(dim=(2, 3), keepdim=True) * scale
-        content_std  = last_stage_feature.std(dim=(2, 3), keepdim=True) * scale
-        style_mean = i_th_feature.mean(dim=(2, 3), keepdim=True) * scale
-        style_std  = i_th_feature.std(dim=(2, 3), keepdim=True) * scale
 
-        normalized_content = (last_stage_feature - content_mean) / (content_std + 1e-5)
-        stylized_feature = normalized_content * style_std + style_mean
-        return stylized_feature
-    
-    def apply_gamma_correction(self, img, gamma=0.8):
-        """Gamma Correction to improve contrast"""
-        return torch.pow(img, gamma)
-
-    def adaptive_contrast(self, img):
-        """Normalize contrast using min-max scaling"""
-        min_val = img.min()
-        max_val = img.max()
-        return (img - min_val) / (max_val - min_val)
-
-    def min_max_norm(self, feature):
-        normalized_feature = (feature - feature.min()) / (feature.max() - feature.min())
-        return normalized_feature
     
     def softmax(self, feature, temp=1):
         feature = feature/temp
@@ -393,15 +370,6 @@ class Infinity(nn.Module):
         a  = 1/normalized_feature.mean()
         return a * normalized_feature
     
-    def abs_mean_std(summed_codes):
-        temp_abs = torch.abs(summed_codes[1:] - summed_codes[0])
-        temp_abs_mean = temp_abs.mean(dim=(1,2,3,4), keepdim=True)
-        temp_abs_std  = temp_abs.std(dim=(1,2,3,4), keepdim=True)
-        threshold = temp_abs_mean + temp_abs_std
-        ref = summed_codes[0].unsqueeze(0).expand_as(summed_codes[1:])
-        summed_codes[1:] = torch.where(temp_abs > threshold, summed_codes[1:], ref)
-        return summed_codes
-
     def forward(self, label_B_or_BLT: Union[torch.LongTensor, Tuple[torch.FloatTensor, torch.IntTensor, int]], x_BLC_wo_prefix: torch.Tensor, scale_schedule: List[Tuple[int]],
         cfg_infer=False,
         **kwargs,

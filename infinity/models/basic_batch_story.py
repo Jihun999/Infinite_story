@@ -279,17 +279,6 @@ class SelfAttention(nn.Module):
         
         return oup
 
-    def adain(self, content_feature, style_feature, norm_type="instance"):
-        if norm_type == "instance":  # Normalize across sequence length (L)
-            content_mean, content_std = content_feature.mean(dim=1, keepdim=True), content_feature.std(dim=1, keepdim=True)
-            style_mean, style_std = style_feature.mean(dim=1, keepdim=True), style_feature.std(dim=1, keepdim=True)
-        
-        elif norm_type == "channel":  # Normalize across head_dim (c)
-            content_mean, content_std = content_feature.mean(dim=-1, keepdim=True), content_feature.std(dim=-1, keepdim=True)
-            style_mean, style_std = style_feature.mean(dim=-1, keepdim=True), style_feature.std(dim=-1, keepdim=True)
-
-        return style_std * (content_feature - content_mean) / (content_std + 1e-6) + style_mean
-
     # NOTE: attn_bias_or_two_vector is None during inference
     def forward(self, x, attn_bias_or_two_vector: Union[torch.Tensor, Tuple[torch.IntTensor, torch.IntTensor]], attn_fn=None, scale_schedule=None, rope2d_freqs_grid=None, scale_ind=0,
                 infer_args=None):
@@ -360,13 +349,8 @@ class SelfAttention(nn.Module):
                 oup = attn_fn(q, k, v, scale=self.scale).transpose(1, 2).reshape(B, L, C)
             else:
                 if infer_args['attn'][0]:
-                    b = B//2 # 배치에서 뒤의 반틈은 unconditional
+                    b = B//2 
                     s_idx, e_idx = infer_args['s_idx'], infer_args['e_idx']
-                    # alpha = infer_args['attn'][4]
-                    # ada_alpha = self.cal_adaptive_weight(q[:b], k[:b], attn_bias_or_two_vector, self.scale, s_idx, e_idx)
-                    # alpha = (torch.tensor(alpha).expand_as(ada_alpha) * ada_alpha).to(v.device)
-                    # print(alpha.view(-1))
-                    # noise = torch.randn_like(v[1:b]) * infer_args['attn'][6] 
 
                     k[1:b] = k[0].expand_as(k[1:b])
                     alpha = F.cosine_similarity(v[0].expand_as(v[1:b]), v[1:b], dim=-1)  
@@ -375,8 +359,7 @@ class SelfAttention(nn.Module):
                     if infer_args['attn'][3]: # cfg_control
                         k[b+1:] = k[b].expand_as(k[b+1:])
                         v[b+1:] = alpha*v[b].expand_as(v[b+1:]) + (1-alpha)*v[b+1:]
-                    # v[1:b] = v[1:b] + noise
-                    # v[1:b] = v[1:b]
+
                     
                 oup = slow_attn(query=q, key=k, value=v, scale=self.scale, attn_mask=attn_bias_or_two_vector, dropout_p=0).transpose(1, 2).reshape(B, L, C)
         return self.proj_drop(self.proj(oup))
@@ -398,7 +381,6 @@ class SelfAttention(nn.Module):
 
         attn_weight = torch.matmul(query, key.transpose(-2, -1)) * scale_factor
         attn_weight += attn_bias
-        # attn_weight = torch.softmax(attn_weight, dim=-1)
         attn_weight = attn_weight[:, :, :, s_idx:e_idx]
         
         ref_var = attn_weight[0].var().item()
@@ -421,7 +403,6 @@ class SelfAttention(nn.Module):
 
         attn_weight = torch.matmul(query, key.transpose(-2, -1)) * scale_factor
         attn_weight += attn_bias
-        # attn_weight = torch.softmax(attn_weight, dim=-1)
         attn_weight = attn_weight[:, :, :, s_idx:e_idx]
         
         ref_var = attn_weight[0].var().item()
@@ -487,7 +468,6 @@ class CrossAttention(nn.Module):
         N = kv_compact.shape[0] # N shape: 98
         
         kv_compact = F.linear(kv_compact, weight=self.mat_kv.weight, bias=torch.cat((self.zero_k_bias, self.v_bias))).view(N, 2, self.num_heads, self.head_dim) # NC => N2Hc
-        # attn_bias = xformers.ops.fmha.BlockDiagonalMask.from_seqlens
         
         if not self.for_attn_pool:
             B, Lq = q.shape[:2]

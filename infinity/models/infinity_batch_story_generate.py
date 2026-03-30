@@ -363,80 +363,6 @@ class Infinity(nn.Module):
         x_BLC = torch.cat(x_BLC_list, dim=1)
         return x_BLC
     
-    def AdaIN(self, content_feature, style_feature, scale=1):
-        content_mean = content_feature.mean(dim=(2, 3), keepdim=True) * scale
-        content_std  = content_feature.std(dim=(2, 3), keepdim=True) * scale
-        style_mean = style_feature.mean(dim=(2, 3), keepdim=True) * scale
-        style_std  = style_feature.std(dim=(2, 3), keepdim=True) * scale
-
-        normalized_content = (content_feature - content_mean) / (content_std + 1e-5)
-        stylized_feature = normalized_content * style_std + style_mean
-        return stylized_feature
-    
-    def apply_gamma_correction(self, img, gamma=0.8):
-        """Gamma Correction to improve contrast"""
-        return torch.pow(img, gamma)
-
-    def adaptive_contrast(self, img):
-        """Normalize contrast using min-max scaling"""
-        min_val = img.min()
-        max_val = img.max()
-        return (img - min_val) / (max_val - min_val)
-
-    def min_max_norm(self, feature):
-        normalized_feature = (feature - feature.min()) / (feature.max() - feature.min())
-        return normalized_feature
-    
-    def softmax(self, feature, temp=1):
-        feature = feature/temp
-        normalized_feature = F.softmax(feature, dim=1)
-        a  = 1/normalized_feature.mean()
-        return a * normalized_feature
-    
-    def mean_std(self, summed_codes):
-        content_mean = summed_codes[1:].mean(dim=(2, 3), keepdim=True) 
-        content_std  = summed_codes[1:].std(dim=(2, 3), keepdim=True)
-        ref_mean = summed_codes[0].mean(dim=(2, 3), keepdim=True) 
-        ref_std  = summed_codes[0].std(dim=(2, 3), keepdim=True)
-        return content_mean, content_std, ref_mean, ref_std
-
-    def abs_mean_std(self, summed_codes):
-        content_mean, content_std, ref_mean, ref_std = self.mean_std(summed_codes)
-
-        content_c = (summed_codes[1:] - content_mean)/content_std
-        ref_c = (summed_codes[0]-ref_mean)/ref_std
-        temp_abs = (content_c - ref_c.expand_as(content_c))
-
-        temp_abs_mean = temp_abs.mean(dim=(1,2,3,4), keepdim=True)
-        temp_abs_std  = temp_abs.std(dim=(1,2,3,4), keepdim=True)
-        threshold = temp_abs_mean - temp_abs_std*7
-        ref = summed_codes[0].unsqueeze(0).expand_as(summed_codes[1:])
-        summed_codes[1:] = torch.where(temp_abs > threshold, summed_codes[1:], ref)
-        return summed_codes
-    
-    def linear(self, x, y_max=1.15):
-        x = x / 12  # 정규화
-        return y_max * (1 - x)
-
-    def concave_down(self, x, y_max=1.15):
-        x = x / 12  # 정규화
-        return y_max * (1 - x**3)
-    
-    def concave_up(self, x, y_max=1.15):
-        x = x / 12  # 정규화
-        return -y_max * ((x - 1) ** 3)
-
-    def cosine_schedule(self, x, y_max=1.15):
-        x = x / 12  # 정규화
-        return y_max * torch.cos(torch.tensor(x * 0.5 * math.pi))
-
-    def exponential(self, x, y_max=1.15, decay_rate=4):
-        x = x / 12  # 정규화
-        return y_max * (torch.exp(torch.tensor(-decay_rate * x)) - torch.exp(torch.tensor(-decay_rate))) / (1 - torch.exp(torch.tensor(-decay_rate)))
-    
-    def constant(self, x, y_max=1):
-        return torch.tensor(0.5)  # 2~7 구간 적분값과 동일한 상수값
-
         
     def forward(self, label_B_or_BLT: Union[torch.LongTensor, Tuple[torch.FloatTensor, torch.IntTensor, int]], x_BLC_wo_prefix: torch.Tensor, scale_schedule: List[Tuple[int]],
         cfg_infer=False,
@@ -881,40 +807,6 @@ class Infinity(nn.Module):
                 codes = vae.quantizer.lfq.indices_to_codes(idx_Bld, label_type='bit_label') # [B, d, 1, h, w] or [B, d, 1, 2h, 2w]
                 if si != num_stages_minus_1:
                     summed_codes += F.interpolate(codes, size=vae_scale_schedule[-1], mode=vae.quantizer.z_interplote_up)
-                    # if si == 0:
-                    #     infer_args['fea_style_alpha'] = 1
-
-                    # elif si == 1:
-                    #     infer_args['fea_style_alpha'] = 1
-
-                    # elif si == 2:
-                    #     infer_args['fea_style_alpha'] = 1
-                        
-                    # elif si == 3:
-                    #     infer_args['fea_style_alpha'] = 1
-                                                
-                    # elif si == 4:
-                    #     infer_args['fea_style_alpha'] = 1
-                        
-                    # elif si == 5:
-                    #     infer_args['fea_style_alpha'] = 1
-
-                    # elif si == 6:
-                    #     infer_args['fea_style_alpha'] = 1
-
-                    # elif si == num_stages_minus_1 - 1:
-                    #     infer_args['fea_style_alpha'] = 1
-
-                    # else:
-                    #     infer_args['fea_style_alpha'] = 1
-                    # summed_codes[1:] = (1 - infer_args['fea_style_alpha']) * summed_codes[0].unsqueeze(0).expand_as(summed_codes[1:]) + infer_args['fea_style_alpha'] * summed_codes[1:]
-                    # if infer_args['apply_adain'][0] and infer_args['apply_adain'][1] == si:
-                    #     summed_codes[1:] = self.AdaIN(summed_codes[1:], summed_codes[0].expand_as(summed_codes[1:]), 0.8)
-                    
-                    # if si > 0 and si < 3:
-                    #     infer_args['attn'][0] = True
-                    # else:
-                    #     infer_args['attn'][0] = False
 
                     last_stage = F.interpolate(summed_codes, size=vae_scale_schedule[si+1], mode=vae.quantizer.z_interplote_up) # [B, d, 1, h, w] or [B, d, 1, 2h, 2w]
                     last_stage = last_stage.squeeze(-3) # [B, d, h, w] or [B, d, 2h, 2w]
@@ -929,7 +821,6 @@ class Infinity(nn.Module):
                     idx_Bl = gt_ls_Bl[si]
                 h_BChw = self.quant_only_used_in_inference[0].embedding(idx_Bl).float()   # BlC
 
-                # h_BChw = h_BChw.float().transpose_(1, 2).reshape(B, self.d_vae, scale_schedule[si][0], scale_schedule[si][1])
                 h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.d_vae, scale_schedule[si][0], scale_schedule[si][1], scale_schedule[si][2])
                 ret.append(h_BChw if returns_vemb != 0 else idx_Bl)
                 idx_Bl_list.append(idx_Bl)
@@ -956,10 +847,7 @@ class Infinity(nn.Module):
         else:
             img = vae.viz_from_ms_h_BChw(ret, scale_schedule=scale_schedule, same_shape=True, last_one=True)
 
-        # img[1:] = (img[1:] + 1) / 2
         img[0:] = (img[0:]- img[0:].min())/(img[0:].max()-img[0:].min())
-        # img = img.permute(0, 2, 3, 1).mul_(255).to(torch.uint8).flip(dims=(3,))
-        # img = img.permute(0, 2, 3, 1)
         return ret, idx_Bl_list, img
     
     @torch.no_grad()

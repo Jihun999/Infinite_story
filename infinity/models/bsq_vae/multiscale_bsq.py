@@ -226,8 +226,6 @@ class MultiScaleBSQ(Module):
             dim = codebook_dim,
             codebook_scale = 1/np.sqrt(codebook_dim),
             soft_clamp_input_value = soft_clamp_input_value,
-            # experimental_softplus_entropy_loss=True,
-            # entropy_loss_offset=2,
             **kwargs
         )
 
@@ -289,7 +287,6 @@ class MultiScaleBSQ(Module):
                 scale_schedule = get_latent2scale_schedule(T, H, W, mode=self.schedule_mode)
                 scale_num = len(scale_schedule)
 
-        # x = self.project_in(x)
         x = x.permute(0, 2, 3, 4, 1).contiguous() # (b, c, t, h, w) => (b, t, h, w, c)
         x = self.project_in(x)
         x = x.permute(0, 4, 1, 2, 3).contiguous() # (b, t, h, w, c) => (b, c, t, h, w) 
@@ -304,11 +301,8 @@ class MultiScaleBSQ(Module):
         var_inputs = []
         residual_norm_per_scale = []
         
-        # go through the layers
         out_fact = init_out_fact = 1.0
-        # residual_list = []
-        # interpolate_residual_list = []
-        # quantized_list = []
+
         if self.drop_when_test:
             drop_lvl_start = self.drop_lvl_idx
             drop_lvl_end = self.drop_lvl_idx + self.drop_lvl_num
@@ -322,8 +316,7 @@ class MultiScaleBSQ(Module):
                     interpolate_residual = residual
                 if return_residual_norm_per_scale:
                     residual_norm_per_scale.append((torch.abs(interpolate_residual) < 0.05 * self.lfq.codebook_scale).sum() / interpolate_residual.numel())
-                # residual_list.append(torch.norm(residual.detach(), dim=1).mean())
-                # interpolate_residual_list.append(torch.norm(interpolate_residual.detach(), dim=1).mean())
+
                 if self.training and self.use_stochastic_depth and random.random() < self.drop_rate:
                     if (si == 0 and self.keep_first_quant) or (si == scale_num - 1 and self.keep_last_quant):
                         quantized, indices, _, loss = self.lfq(interpolate_residual)
@@ -335,8 +328,6 @@ class MultiScaleBSQ(Module):
                 elif self.drop_when_test and drop_lvl_start <= si < drop_lvl_end:
                     continue                     
                 else:
-                    # residual_norm = torch.norm(interpolate_residual.detach(), dim=1) # (b, t, h, w)
-                    # print(si, residual_norm.min(), residual_norm.max(), residual_norm.mean())
                     quantized, indices, bit_indices, loss = self.lfq(interpolate_residual)
                     if self.random_flip and si < self.max_flip_lvl:
                         quantized = self.flip_quant(quantized)
@@ -344,7 +335,6 @@ class MultiScaleBSQ(Module):
                         quantized = self.flip_quant(quantized)
                     quantized = quantized * out_fact
                     all_indices.append(indices)
-                # quantized_list.append(torch.norm(quantized.detach(), dim=1).mean())
                 if (pt, ph, pw) != (T, H, W):
                     quantized = F.interpolate(quantized, size=(T, H, W), mode=self.z_interplote_up).contiguous()
                 
@@ -361,11 +351,6 @@ class MultiScaleBSQ(Module):
                 
                 if self.use_decay_factor:
                     out_fact -= 0.1
-        # print("residual_list:", residual_list)
-        # print("interpolate_residual_list:", interpolate_residual_list)
-        # print("quantized_list:", quantized_list)
-        # import ipdb; ipdb.set_trace()
-        # project out, if needed
         quantized_out = quantized_out.permute(0, 2, 3, 4, 1).contiguous() # (b, c, t, h, w) => (b, t, h, w, c)
         quantized_out = self.project_out(quantized_out)
         quantized_out = quantized_out.permute(0, 4, 1, 2, 3).contiguous() # (b, t, h, w, c) => (b, c, t, h, w)
