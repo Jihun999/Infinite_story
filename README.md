@@ -127,6 +127,7 @@ Evaluation dependencies (`dreamsim`, `clip`, `carvekit`, `scikit-learn`) are inc
 ```
 ├── story_generation.py              # Main inference script
 ├── evaluate.py                      # Evaluation metrics script
+├── requirements.txt                 # Python dependencies
 ├── scripts/
 │   ├── infer.sh                     # Inference script (paper defaults)
 │   └── evaluate.sh                  # Evaluation script
@@ -138,6 +139,8 @@ Evaluation dependencies (`dreamsim`, `clip`, `carvekit`, `scikit-learn`) are inc
 │   │   ├── basic_batch_story.py              # Story-specific attention blocks
 │   │   ├── infinity.py                       # Base Infinity transformer
 │   │   ├── basic.py                          # Base attention blocks
+│   │   ├── flex_attn.py                      # FlexAttention utilities
+│   │   ├── fused_op.py                       # Fused operations
 │   │   └── bsq_vae/                          # Visual tokenizer (VAE)
 │   └── utils/
 │       ├── dynamic_resolution.py             # Multi-scale resolution configs
@@ -145,8 +148,6 @@ Evaluation dependencies (`dreamsim`, `clip`, `carvekit`, `scikit-learn`) are inc
 │       └── misc.py                           # Miscellaneous utilities
 ├── prompt/                          # Story prompt definitions
 │   └── consistory_plus.yaml
-│  
-│  
 └── weights/                         # Model checkpoints (download separately)
 ```
 
