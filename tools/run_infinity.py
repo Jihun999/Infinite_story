@@ -77,6 +77,7 @@ def encode_prompt_batch(text_tokenizer, text_encoder, prompt, enable_positive_pr
     common_len = match_counts[1]
 
     text_features = text_encoder(input_ids=input_ids, attention_mask=mask)['last_hidden_state'].float()
+    # Identity Prompt Replacement
     if infer_args['text_replace']:
         common_feature = text_features[:, :common_len]
         scale = cal_scale_difference(common_feature, common_len)
@@ -92,15 +93,8 @@ def encode_prompt_batch(text_tokenizer, text_encoder, prompt, enable_positive_pr
         kv_compact.append(feat_i[:len_i])
     kv_compact = torch.cat(kv_compact, dim=0)
     text_cond_tuple = (kv_compact, lens, cu_seqlens_k, Ltext)
-    if infer_args is not None:
-        infer_args['prompt_tokens'] = []
-        for idx in range(len(prompt)):
-            token_list = text_tokenizer.convert_ids_to_tokens(input_ids[idx])
-            used_tokens = [token for token in token_list if token != "<pad>"]
-            infer_args['prompt_tokens'].append(used_tokens)
-        return text_cond_tuple, infer_args, common_len
-    else:
-        return text_cond_tuple
+    
+    return text_cond_tuple
 
 
 def aug_with_positive_prompt(prompt):

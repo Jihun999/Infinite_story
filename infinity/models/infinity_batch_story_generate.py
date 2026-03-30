@@ -362,7 +362,20 @@ class Infinity(nn.Module):
         x_BLC_list.append(x_BLC[:,ptr:])
         x_BLC = torch.cat(x_BLC_list, dim=1)
         return x_BLC
+
+    def softmax(self, feature, temp=1):
+        feature = feature/temp
+        normalized_feature = F.softmax(feature, dim=1)
+        a  = 1/normalized_feature.mean()
+        return a * normalized_feature
     
+    def mean_std(self, summed_codes):
+        content_mean = summed_codes[1:].mean(dim=(2, 3), keepdim=True) 
+        content_std  = summed_codes[1:].std(dim=(2, 3), keepdim=True)
+        ref_mean = summed_codes[0].mean(dim=(2, 3), keepdim=True) 
+        ref_std  = summed_codes[0].std(dim=(2, 3), keepdim=True)
+        return content_mean, content_std, ref_mean, ref_std
+
         
     def forward(self, label_B_or_BLT: Union[torch.LongTensor, Tuple[torch.FloatTensor, torch.IntTensor, int]], x_BLC_wo_prefix: torch.Tensor, scale_schedule: List[Tuple[int]],
         cfg_infer=False,
@@ -453,8 +466,9 @@ class Infinity(nn.Module):
         # [3. unpad the seqlen dim, and then get logits]
         return self.get_logits(x_BLC[:, :l_end], cond_BD)    # return logits BLV, V is vocab_size
 
+    
     @torch.no_grad()
-    def autoregressive_infer_cfg_batch(
+    def autoregressive_infer_cfg_batch_story(
         self,
         vae=None,
         scale_schedule=None,
@@ -469,19 +483,20 @@ class Infinity(nn.Module):
         inference_mode=False,
         save_img_path=None,
         sampling_per_bits=1,
+        infer_args=None,
+        common_len = None
     ):   # returns List[idx_Bl]
         if g_seed is None: rng = None
         else: self.rng.manual_seed(g_seed); rng = self.rng
         assert len(cfg_list) >= len(scale_schedule)
         assert len(tau_list) >= len(scale_schedule)
-
         # scale_schedule is used by infinity, vae_scale_schedule is used by vae if there exists a spatial patchify, 
         # we need to convert scale_schedule to vae_scale_schedule by multiply 2 to h and w
         if self.apply_spatial_patchify:
             vae_scale_schedule = [(pt, 2*ph, 2*pw) for pt, ph, pw in scale_schedule]
         else:
             vae_scale_schedule = scale_schedule
-        
+
         kv_compact, lens, cu_seqlens_k, max_seqlen_k = label_B_or_BLT
         if any(np.array(cfg_list) != 1):
             bs = 2*B
@@ -489,25 +504,25 @@ class Infinity(nn.Module):
                 kv_compact_un = kv_compact.clone()
                 total = 0
                 for le in lens:
-                    kv_compact_un[total:total+le] = (self.cfg_uncond)[:le] # cond 길이에 맞게 uncond도 값을 만들어줌
+                    kv_compact_un[total:total+le] = (self.cfg_uncond)[:le]
                     total += le
                 kv_compact = torch.cat((kv_compact, kv_compact_un), dim=0)
                 cu_seqlens_k = torch.cat((cu_seqlens_k, cu_seqlens_k[1:]+cu_seqlens_k[-1]), dim=0)
             else:
                 kv_compact_un, lens_un, cu_seqlens_k_un, max_seqlen_k_un = negative_label_B_or_BLT
-                kv_compact = torch.cat((kv_compact, kv_compact_un), dim=0) # 여기서 cond, uncond 가 concat 됨
+                kv_compact = torch.cat((kv_compact, kv_compact_un), dim=0)
                 cu_seqlens_k = torch.cat((cu_seqlens_k, cu_seqlens_k_un[1:]+cu_seqlens_k[-1]), dim=0)
                 max_seqlen_k = max(max_seqlen_k, max_seqlen_k_un)
         else:
             bs = B
-        kv_compact = self.text_norm(kv_compact) # prompt가 4개인 경우 = batch 4 기준으로 주석 작성 # shape: 98, 2048
-        sos = cond_BD = self.text_proj_for_sos((kv_compact, cu_seqlens_k, max_seqlen_k)) # shape: 8, 2048 (2는 cfg용, batch는 4)
-        kv_compact = self.text_proj_for_ca(kv_compact) # shape: 98, 2048
-        ca_kv = kv_compact, cu_seqlens_k, max_seqlen_k # cu_seqlens_k shape: 9, # cu_seqlens_k: [ 0, 10, 22, 37, 49, 59, 71, 86, 98], max_seqlen_k: 15
-        last_stage = sos.unsqueeze(1).expand(bs, 1, -1) + self.pos_start.expand(bs, 1, -1) # shape: 8, 1, 2048
+        kv_compact = self.text_norm(kv_compact)
+        sos = cond_BD = self.text_proj_for_sos((kv_compact, cu_seqlens_k, max_seqlen_k), infer_args=infer_args)
+        kv_compact = self.text_proj_for_ca(kv_compact) 
+        ca_kv = kv_compact, cu_seqlens_k, max_seqlen_k 
+        last_stage = sos.unsqueeze(1).expand(bs, 1, -1) + self.pos_start.expand(bs, 1, -1) 
 
         with torch.amp.autocast('cuda', enabled=False):
-            cond_BD_or_gss = self.shared_ada_lin(cond_BD.float()).float().contiguous() # 8, 1, 6, 2048
+            cond_BD_or_gss = self.shared_ada_lin(cond_BD.float()).float().contiguous() 
         accu_BChw, cur_L, ret = None, 0, []  # current length, list of reconstructed images
         idx_Bl_list, idx_Bld_list = [], []
 
@@ -539,14 +554,19 @@ class Infinity(nn.Module):
             cfg = cfg_list[si]
             if si >= trunk_scale:
                 break
-            cur_L += np.array(pn).prod()
+            cur_L += np.array(pn).prod()        
+
+
+            if infer_args['attn'][5]:
+                if si<infer_args['attn'][1] and si>1:
+                    infer_args['attn'][0] = True
+                else:
+                    infer_args['attn'][0] = False
+
 
             need_to_pad = 0
             attn_fn = None
             if self.use_flex_attn:
-                # need_to_pad = (self.pad_to_multiplier - cur_L % self.pad_to_multiplier) % self.pad_to_multiplier
-                # if need_to_pad:
-                #     last_stage = F.pad(last_stage, (0, 0, 0, need_to_pad))
                 attn_fn = self.attn_fn_compile_dict.get(tuple(scale_schedule[:(si+1)]), None)
 
             # assert self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L].sum() == 0, f'AR with {(self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L] != 0).sum()} / {self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L].numel()} mask item'
@@ -559,10 +579,10 @@ class Infinity(nn.Module):
                     last_stage = self.add_lvl_embeding(last_stage, si, scale_schedule, need_to_pad=need_to_pad)
                 
                 for m in b.module:
-                    last_stage = m(x=last_stage, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=None, attn_fn=attn_fn, scale_schedule=scale_schedule, rope2d_freqs_grid=self.rope2d_freqs_grid, scale_ind=si)
+                    last_stage = m(x=last_stage, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=None, attn_fn=attn_fn, scale_schedule=scale_schedule, rope2d_freqs_grid=self.rope2d_freqs_grid, scale_ind=si, 
+                                   infer_args=infer_args)
                     if (cfg != 1) and (layer_idx in abs_cfg_insertion_layers):
-                        # print(f'add cfg={cfg} on {layer_idx}-th layer output')
-                        last_stage = cfg * last_stage[:B] + (1-cfg) * last_stage[B:] # cfg 적용
+                        last_stage = cfg * last_stage[:B] + (1-cfg) * last_stage[B:]
                         last_stage = torch.cat((last_stage, last_stage), 0)
                     layer_idx += 1
             
@@ -597,6 +617,7 @@ class Infinity(nn.Module):
                 codes = vae.quantizer.lfq.indices_to_codes(idx_Bld, label_type='bit_label') # [B, d, 1, h, w] or [B, d, 1, 2h, 2w]
                 if si != num_stages_minus_1:
                     summed_codes += F.interpolate(codes, size=vae_scale_schedule[-1], mode=vae.quantizer.z_interplote_up)
+
                     last_stage = F.interpolate(summed_codes, size=vae_scale_schedule[si+1], mode=vae.quantizer.z_interplote_up) # [B, d, 1, h, w] or [B, d, 1, 2h, 2w]
                     last_stage = last_stage.squeeze(-3) # [B, d, h, w] or [B, d, 2h, 2w]
                     if self.apply_spatial_patchify: # patchify operation
@@ -637,217 +658,8 @@ class Infinity(nn.Module):
         else:
             img = vae.viz_from_ms_h_BChw(ret, scale_schedule=scale_schedule, same_shape=True, last_one=True)
 
-        img = (img - img.min()) / (img.max() - img.min())  # 정규화
-        img = img.permute(0, 2, 3, 1) * 255
-        img = img.to(torch.uint8)  
-        img = img.flip(dims=(3,))
-
-        return ret, idx_Bl_list, img
-    
-    @torch.no_grad()
-    def autoregressive_infer_cfg_batch_story(
-        self,
-        vae=None,
-        scale_schedule=None,
-        label_B_or_BLT=None,
-        B=1, negative_label_B_or_BLT=None, force_gt_Bhw=None,
-        g_seed=None, cfg_list=[], tau_list=[], cfg_sc=3, top_k=0, top_p=0.0,
-        returns_vemb=0, ratio_Bl1=None, gumbel=0, norm_cfg=False,
-        cfg_exp_k: float=0.0, cfg_insertion_layer=[-5],
-        vae_type=0, softmax_merge_topk=-1, ret_img=False,
-        trunk_scale=1000,
-        gt_leak=0, gt_ls_Bl=None,
-        inference_mode=False,
-        save_img_path=None,
-        sampling_per_bits=1,
-        infer_args=None,
-        common_len = None
-    ):   # returns List[idx_Bl]
-        if g_seed is None: rng = None
-        else: self.rng.manual_seed(g_seed); rng = self.rng
-        assert len(cfg_list) >= len(scale_schedule)
-        assert len(tau_list) >= len(scale_schedule)
-        # scale_schedule is used by infinity, vae_scale_schedule is used by vae if there exists a spatial patchify, 
-        # we need to convert scale_schedule to vae_scale_schedule by multiply 2 to h and w
-        if self.apply_spatial_patchify:
-            vae_scale_schedule = [(pt, 2*ph, 2*pw) for pt, ph, pw in scale_schedule]
-        else:
-            vae_scale_schedule = scale_schedule
-
-        # if infer_args['attn'][2] == 'adaptive':
-        #     alpha_func = self.exponential
-
-        # infer_args['graph_weight'] =0.25
-        kv_compact, lens, cu_seqlens_k, max_seqlen_k = label_B_or_BLT
-        if any(np.array(cfg_list) != 1):
-            bs = 2*B
-            if not negative_label_B_or_BLT:
-                kv_compact_un = kv_compact.clone()
-                total = 0
-                for le in lens:
-                    kv_compact_un[total:total+le] = (self.cfg_uncond)[:le] # cond 길이에 맞게 uncond도 값을 만들어줌
-                    total += le
-                kv_compact = torch.cat((kv_compact, kv_compact_un), dim=0)
-                cu_seqlens_k = torch.cat((cu_seqlens_k, cu_seqlens_k[1:]+cu_seqlens_k[-1]), dim=0)
-            else:
-                kv_compact_un, lens_un, cu_seqlens_k_un, max_seqlen_k_un = negative_label_B_or_BLT
-                kv_compact = torch.cat((kv_compact, kv_compact_un), dim=0) # 여기서 cond, uncond 가 concat 됨
-                cu_seqlens_k = torch.cat((cu_seqlens_k, cu_seqlens_k_un[1:]+cu_seqlens_k[-1]), dim=0)
-                max_seqlen_k = max(max_seqlen_k, max_seqlen_k_un)
-        else:
-            bs = B
-        kv_compact = self.text_norm(kv_compact) # prompt가 4개인 경우 = batch 4 기준으로 주석 작성 # shape: 98, 2048
-        sos = cond_BD = self.text_proj_for_sos((kv_compact, cu_seqlens_k, max_seqlen_k), infer_args=infer_args) # shape: 8, 2048 (2는 cfg용, batch는 4)
-        kv_compact = self.text_proj_for_ca(kv_compact) # shape: 98, 2048
-        ca_kv = kv_compact, cu_seqlens_k, max_seqlen_k # cu_seqlens_k shape: 9, # cu_seqlens_k: [ 0, 10, 22, 37, 49, 59, 71, 86, 98], max_seqlen_k: 15
-        last_stage = sos.unsqueeze(1).expand(bs, 1, -1) + self.pos_start.expand(bs, 1, -1) # shape: 8, 1, 2048
-
-        with torch.amp.autocast('cuda', enabled=False):
-            cond_BD_or_gss = self.shared_ada_lin(cond_BD.float()).float().contiguous() # 8, 1, 6, 2048
-        accu_BChw, cur_L, ret = None, 0, []  # current length, list of reconstructed images
-        idx_Bl_list, idx_Bld_list = [], []
-
-        if inference_mode:
-            for b in self.unregistered_blocks: (b.sa if isinstance(b, CrossAttnBlock) else b.attn).kv_caching(True)
-        else:
-            assert self.num_block_chunks > 1
-            for block_chunk_ in self.block_chunks:
-                for module in block_chunk_.module.module:
-                    (module.sa if isinstance(module, CrossAttnBlock) else module.attn).kv_caching(True)
-        
-        abs_cfg_insertion_layers = []
-        add_cfg_on_logits, add_cfg_on_probs = False, False
-        leng = len(self.unregistered_blocks)
-        for item in cfg_insertion_layer:
-            if item == 0: # add cfg on logits
-                add_cfg_on_logits = True
-            elif item == 1: # add cfg on probs
-                add_cfg_on_probs = True # todo in the future, we may want to add cfg on logits and probs
-            elif item < 0: # determine to add cfg at item-th layer's output
-                assert leng+item > 0, f'cfg_insertion_layer: {item} is not valid since len(unregistered_blocks)={self.num_block_chunks}'
-                abs_cfg_insertion_layers.append(leng+item)
-            else:
-                raise ValueError(f'cfg_insertion_layer: {item} is not valid')
-        
-        num_stages_minus_1 = len(scale_schedule)-1
-        summed_codes = 0
-        for si, pn in enumerate(scale_schedule):   # si: i-th segment
-            cfg = cfg_list[si]
-            if si >= trunk_scale:
-                break
-            cur_L += np.array(pn).prod()        
-            # if infer_args['attn'][0] and infer_args['attn'][2] == 'adaptive':
-            #     infer_args['attn'][4] = alpha_func(si, 1, infer_args['attn'][3])
-            if infer_args['attn'][5]:
-                if si<infer_args['attn'][1] and si>1:
-                    infer_args['attn'][0] = True
-                else:
-                    infer_args['attn'][0] = False
-
-            # elif infer_args['attn'][0] and infer_args['attn'][2] == 'constant':
-            #     if 0 <= si <= infer_args['attn'][1]:
-            #         infer_args['attn'][4] = 0.3
-            # else:
-            #     infer_args['attn'][0] = False
-        
-
-            need_to_pad = 0
-            attn_fn = None
-            if self.use_flex_attn:
-                # need_to_pad = (self.pad_to_multiplier - cur_L % self.pad_to_multiplier) % self.pad_to_multiplier
-                # if need_to_pad:
-                #     last_stage = F.pad(last_stage, (0, 0, 0, need_to_pad))
-                attn_fn = self.attn_fn_compile_dict.get(tuple(scale_schedule[:(si+1)]), None)
-
-            # assert self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L].sum() == 0, f'AR with {(self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L] != 0).sum()} / {self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L].numel()} mask item'
-            layer_idx = 0
-            for block_idx, b in enumerate(self.block_chunks):
-                # last_stage shape: [4, 1, 2048], cond_BD_or_gss.shape: [4, 1, 6, 2048], ca_kv[0].shape: [64, 2048], ca_kv[1].shape [5], ca_kv[2]: int
-                if self.add_lvl_embeding_only_first_block and block_idx == 0:
-                    last_stage = self.add_lvl_embeding(last_stage, si, scale_schedule, need_to_pad=need_to_pad)
-                if not self.add_lvl_embeding_only_first_block: 
-                    last_stage = self.add_lvl_embeding(last_stage, si, scale_schedule, need_to_pad=need_to_pad)
-                
-                for m in b.module:
-                    last_stage = m(x=last_stage, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=None, attn_fn=attn_fn, scale_schedule=scale_schedule, rope2d_freqs_grid=self.rope2d_freqs_grid, scale_ind=si, 
-                                   infer_args=infer_args)
-                    if (cfg != 1) and (layer_idx in abs_cfg_insertion_layers):
-                        last_stage = cfg * last_stage[:B] + (1-cfg) * last_stage[B:] # cfg 적용
-                        last_stage = torch.cat((last_stage, last_stage), 0)
-                    layer_idx += 1
-            
-            if (cfg != 1) and add_cfg_on_logits:
-                # print(f'add cfg on add_cfg_on_logits')
-                logits_BlV = self.get_logits(last_stage, cond_BD).mul(1/tau_list[si])
-                logits_BlV = cfg * logits_BlV[:B] + (1-cfg) * logits_BlV[B:]
-            else:
-                logits_BlV = self.get_logits(last_stage[:B], cond_BD[:B]).mul(1/tau_list[si])
-            
-            if self.use_bit_label:
-                tmp_bs, tmp_seq_len = logits_BlV.shape[:2]
-                logits_BlV = logits_BlV.reshape(tmp_bs, -1, 2)
-                idx_Bld = sample_with_top_k_top_p_also_inplace_modifying_logits_(logits_BlV, rng=rng, top_k=top_k or self.top_k, top_p=top_p or self.top_p, num_samples=1)[:, :, 0]
-                idx_Bld = idx_Bld.reshape(tmp_bs, tmp_seq_len, -1)
-            else:
-                idx_Bl = sample_with_top_k_top_p_also_inplace_modifying_logits_(logits_BlV, rng=rng, top_k=top_k or self.top_k, top_p=top_p or self.top_p, num_samples=1)[:, :, 0]
-            if vae_type != 0:
-                assert returns_vemb
-                if si < gt_leak:
-                    idx_Bld = gt_ls_Bl[si]
-                else:
-                    assert pn[0] == 1
-                    idx_Bld = idx_Bld.reshape(B, pn[1], pn[2], -1) # shape: [B, h, w, d] or [B, h, w, 4d]
-                    if self.apply_spatial_patchify: # unpatchify operation
-                        idx_Bld = idx_Bld.permute(0,3,1,2) # [B, 4d, h, w]
-                        idx_Bld = torch.nn.functional.pixel_shuffle(idx_Bld, 2) # [B, d, 2h, 2w]
-                        idx_Bld = idx_Bld.permute(0,2,3,1) # [B, 2h, 2w, d]
-                    idx_Bld = idx_Bld.unsqueeze(1) # [B, 1, h, w, d] or [B, 1, 2h, 2w, d]
-
-                idx_Bld_list.append(idx_Bld)
-                codes = vae.quantizer.lfq.indices_to_codes(idx_Bld, label_type='bit_label') # [B, d, 1, h, w] or [B, d, 1, 2h, 2w]
-                if si != num_stages_minus_1:
-                    summed_codes += F.interpolate(codes, size=vae_scale_schedule[-1], mode=vae.quantizer.z_interplote_up)
-
-                    last_stage = F.interpolate(summed_codes, size=vae_scale_schedule[si+1], mode=vae.quantizer.z_interplote_up) # [B, d, 1, h, w] or [B, d, 1, 2h, 2w]
-                    last_stage = last_stage.squeeze(-3) # [B, d, h, w] or [B, d, 2h, 2w]
-                    if self.apply_spatial_patchify: # patchify operation
-                        last_stage = torch.nn.functional.pixel_unshuffle(last_stage, 2) # [B, 4d, h, w]
-                    last_stage = last_stage.reshape(*last_stage.shape[:2], -1) # [B, d, h*w] or [B, 4d, h*w]
-                    last_stage = torch.permute(last_stage, [0,2,1]) # [B, h*w, d] or [B, h*w, 4d]
-                else:
-                    summed_codes += codes
-            else:
-                if si < gt_leak:
-                    idx_Bl = gt_ls_Bl[si]
-                h_BChw = self.quant_only_used_in_inference[0].embedding(idx_Bl).float()   # BlC
-
-                h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.d_vae, scale_schedule[si][0], scale_schedule[si][1], scale_schedule[si][2])
-                ret.append(h_BChw if returns_vemb != 0 else idx_Bl)
-                idx_Bl_list.append(idx_Bl)
-                if si != num_stages_minus_1:
-                    accu_BChw, last_stage = self.quant_only_used_in_inference[0].one_step_fuse(si, num_stages_minus_1+1, accu_BChw, h_BChw, scale_schedule)
-            
-            if si != num_stages_minus_1:
-                last_stage = self.word_embed(self.norm0_ve(last_stage))
-                last_stage = last_stage.repeat(bs//B, 1, 1)
-
-        if inference_mode:
-            for b in self.unregistered_blocks: (b.sa if isinstance(b, CrossAttnBlock) else b.attn).kv_caching(False)
-        else:
-            assert self.num_block_chunks > 1
-            for block_chunk_ in self.block_chunks:
-                for module in block_chunk_.module.module:
-                    (module.sa if isinstance(module, CrossAttnBlock) else module.attn).kv_caching(False)
-
-        if not ret_img:
-            return ret, idx_Bl_list, []
-        
-        if vae_type != 0:
-            img = vae.decode(summed_codes.squeeze(-3))
-        else:
-            img = vae.viz_from_ms_h_BChw(ret, scale_schedule=scale_schedule, same_shape=True, last_one=True)
-
         img[0:] = (img[0:]- img[0:].min())/(img[0:].max()-img[0:].min())
+
         return ret, idx_Bl_list, img
     
     @torch.no_grad()
@@ -942,9 +754,7 @@ class Infinity(nn.Module):
             need_to_pad = 0
             attn_fn = None
             if self.use_flex_attn:
-                # need_to_pad = (self.pad_to_multiplier - cur_L % self.pad_to_multiplier) % self.pad_to_multiplier
-                # if need_to_pad:
-                #     last_stage = F.pad(last_stage, (0, 0, 0, need_to_pad))
+
                 attn_fn = self.attn_fn_compile_dict.get(tuple(scale_schedule[:(si+1)]), None)
 
             # assert self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L].sum() == 0, f'AR with {(self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L] != 0).sum()} / {self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L].numel()} mask item'

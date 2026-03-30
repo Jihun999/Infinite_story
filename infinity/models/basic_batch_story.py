@@ -245,40 +245,6 @@ class SelfAttention(nn.Module):
         self.cached_v = None
 
 
-    def apply_attention_bias_injection(self, q, k, v, slow_attn, style_q, style_k, scale, dropout_p=0, attn_mask=None, bias_scale=0.1):
-        """
-        Apply attention bias injection before feeding into slow_attn.
-
-        q, k, v: (B, L, H, c) - Query, Key, Value tensors
-        slow_attn: Function that computes attention
-        style_q, style_k: (B, L, H, c) - Style reference for Q and K
-        scale: Scaling factor for attention
-        dropout_p: Dropout probability
-        attn_mask: (B, H, L, L) - Original attention mask
-        bias_scale: Scaling factor for style-aware bias
-        """
-        B, L, H, c = q.shape  # Extract tensor shapes
-
-        # Compute standard attention scores (B, H, L, L)
-        # attn_scores = torch.matmul(q.transpose(1, 2), k.transpose(1, 2).transpose(-2, -1)) / scale
-
-        # Compute style-based bias (B, H, L, L)
-        style_bias = bias_scale * (torch.matmul(style_q.transpose(1, 2), style_k.transpose(1, 2).transpose(-2, -1)) / scale)
-
-        # Inject bias into attention scores
-        if attn_mask is not None:
-            attn_bias = attn_mask + style_bias  # Combine original mask and style bias
-        else:
-            attn_bias = style_bias  # Use only style bias if no mask is provided
-
-        # Pass updated bias into slow_attn
-        oup = slow_attn(query=q, key=k, value=v, scale=scale, attn_mask=attn_bias, dropout_p=dropout_p)
-
-        # Reshape output to (B, L, C) for compatibility
-        oup = oup.transpose(1, 2).reshape(B, L, H * c)
-        
-        return oup
-
     # NOTE: attn_bias_or_two_vector is None during inference
     def forward(self, x, attn_bias_or_two_vector: Union[torch.Tensor, Tuple[torch.IntTensor, torch.IntTensor]], attn_fn=None, scale_schedule=None, rope2d_freqs_grid=None, scale_ind=0,
                 infer_args=None):
@@ -325,13 +291,6 @@ class SelfAttention(nn.Module):
             v = v.contiguous()      # bf16
         if rope2d_freqs_grid is not None:
             q, k = apply_rotary_emb(q, k, scale_schedule, rope2d_freqs_grid, self.pad_to_multiplier, self.rope2d_normalized_by_hw, scale_ind) #, freqs_cis=freqs_cis)
-        if infer_args['attn'][0]:
-            if self.cached_k is None:
-                infer_args['s_idx'] = 0
-                infer_args['e_idx'] = k.size(2)
-            else:
-                infer_args['s_idx'] = self.cached_k.size(2)
-                infer_args['e_idx'] = self.cached_k.size(2) + k.size(2)
         if self.caching:    # kv caching: only used during inference
             if self.cached_k is None: self.cached_k = k; self.cached_v = v
             else: k = self.cached_k = torch.cat((self.cached_k, k), dim=L_dim); v = self.cached_v = torch.cat((self.cached_v, v), dim=L_dim)
@@ -348,19 +307,19 @@ class SelfAttention(nn.Module):
             if self.use_flex_attn and attn_fn is not None:
                 oup = attn_fn(q, k, v, scale=self.scale).transpose(1, 2).reshape(B, L, C)
             else:
+                # Adaptive Style Injection
                 if infer_args['attn'][0]:
                     b = B//2 
-                    s_idx, e_idx = infer_args['s_idx'], infer_args['e_idx']
-
                     k[1:b] = k[0].expand_as(k[1:b])
                     alpha = F.cosine_similarity(v[0].expand_as(v[1:b]), v[1:b], dim=-1)  
                     alpha = alpha.unsqueeze(-1)*infer_args['attn'][2] # weight
                     v[1:b] = alpha*v[0].expand_as(v[1:b]) + (1-alpha)*v[1:b]
+                    
+                    # Synchronized Guidance Adaptation
                     if infer_args['attn'][3]: # cfg_control
                         k[b+1:] = k[b].expand_as(k[b+1:])
                         v[b+1:] = alpha*v[b].expand_as(v[b+1:]) + (1-alpha)*v[b+1:]
 
-                    
                 oup = slow_attn(query=q, key=k, value=v, scale=self.scale, attn_mask=attn_bias_or_two_vector, dropout_p=0).transpose(1, 2).reshape(B, L, C)
         return self.proj_drop(self.proj(oup))
     
@@ -368,49 +327,6 @@ class SelfAttention(nn.Module):
         tail = ''
         return f'using_flash={self.using_flash}, tau={self.tau}, cos_attn={self.cos_attn}{tail}'
 
-    def cal_adaptive_weight(self, query, key, attn_mask, scale, s_idx, e_idx):
-        B = query.size(0)
-        L, S = query.size(-2), key.size(-2)
-        scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
-        attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
-        if attn_mask is not None:
-            if attn_mask.dtype == torch.bool:
-                attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
-            else:
-                attn_bias = attn_mask + attn_bias
-
-        attn_weight = torch.matmul(query, key.transpose(-2, -1)) * scale_factor
-        attn_weight += attn_bias
-        attn_weight = attn_weight[:, :, :, s_idx:e_idx]
-        
-        ref_var = attn_weight[0].var().item()
-        ada_weight = torch.ones(B-1)
-        for i in range(1, B):
-            curr_var = attn_weight[i].var().item()
-            ada_weight[i-1] = (ref_var / curr_var + 1e-8)
-        return ada_weight.view(-1, 1, 1, 1)
-    
-    def rev_cal_adaptive_weight(self, query, key, attn_mask, scale, s_idx, e_idx):
-        B = query.size(0)
-        L, S = query.size(-2), key.size(-2)
-        scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
-        attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
-        if attn_mask is not None:
-            if attn_mask.dtype == torch.bool:
-                attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
-            else:
-                attn_bias = attn_mask + attn_bias
-
-        attn_weight = torch.matmul(query, key.transpose(-2, -1)) * scale_factor
-        attn_weight += attn_bias
-        attn_weight = attn_weight[:, :, :, s_idx:e_idx]
-        
-        ref_var = attn_weight[0].var().item()
-        ada_weight = torch.ones(B-1)
-        for i in range(1, B):
-            curr_var = attn_weight[i].var().item()
-            ada_weight[i-1] = (curr_var / ref_var + 1e-8)
-        return ada_weight.view(-1, 1, 1, 1)
 
 class CrossAttention(nn.Module):
     def __init__(
