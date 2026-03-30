@@ -8,7 +8,7 @@ __pycache__/
 *.safetensors
 weights/
 output/
-models/
+/models/
 logs/
 *.log
 .DS_Store
